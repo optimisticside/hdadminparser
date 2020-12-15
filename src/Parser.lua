@@ -4,28 +4,22 @@
 
 local package = script.Parent
 
-local Token = require(package.Token)
+local Lexer = require(package.Lexer)
 local Syntax = require(package.Syntax)
+local Token = require(package.Token)
 
 local Parser = {}
 Parser.__index = Parser
 
-function Parser:error(msg)
-	
-end
-
-function Parser:formatBunch(bunch)
-	local bell = Syntax.bunch.escape.."b"
-	local newLine = Syntax.bunch.escape.."n"
-	local horizTab = Syntax.bunch.escape.."t"
-	local vertTab = Syntax.bunch.escape.."v"
-	local escapeOverride = Syntax.bunch.escape..Syntax.bunch.escape
-	
-	return bunch:gsub(bell, "\b"):gsub(newLine, "\n"):gsub(horizTab, "t"):gsub(vertTab, "v"):gsub(escapeOverride, Syntax.bunch.escape)
-end
+Parser.EOF = 0
+Parser.STATEMENT = 1
+Parser.ARG = 2
+Parser.ARG_SEGMENT = 3
 
 function Parser:advance()
+	-- ensure not out of boundd
 	if self.pos < self.size then
+		-- advance by 1 character
 		self.pos = self.pos + 1
 		self.token = self.tokens[self.pos]
 	end
@@ -33,141 +27,124 @@ end
 
 function Parser:readArgSegment()
 	local segment = {
+		type = Parser.ARG_SEGMENT,
+		pos = self.pos,
 		call = nil,
-		param = nil
+		param = nil,
 	}
-	
-	local lastSplit = self.pos
-	local complete = false
-	
-	while self.pos <= self.size and not complete do
-		complete = true
-		
-		if self.token.type == Token.OPER and self.token.str == Syntax.oper.argParam then
-			print('arg paramer')
-			lastSplit = self.pos
-			
-		else
-			if self.pos - lastSplit > 1 then
-				complete = true
-			end
-			
-			if self.token.type == Token.IDEN or self.token.type == Token.BUNCH then
-				local str = self.token.str
-				if self.token.type == Token.BUNCH then
-					str = self:formatBunch(str)
-				end
-				
-				if segment.call then
-					print('param')
-					segment.param = str
-				else
-					print('call', self.pos, self.size, self.token.str)
-					segment.call = str
-				end
+
+	-- go through tokens and ensure bounds
+	while self.pos <= self.size do
+		-- if we already have data
+		-- then make sure there was an argParam operator before this token
+		if segment.call then
+			local lastTok = self.tokens[self.pos-1]
+			if segment.param or lastTok.type ~= Token.OPER or lastTok.str ~= Syntax.oper.argParam then
+				break
 			end
 		end
-		
-		if self.pos == self.size then
-			return segment
+
+		-- collect identifier or bunch and handle accordingly
+		if self.token.type == Token.IDEN or self.token.type == Token.BUNCH then
+			if not segment.call then
+				segment.call = self.token.str
+			else
+				segment.param = self.token.str
+			end
 		end
-		
+
+		-- advance for next loop
 		self:advance()
 	end
-	
+
+	-- return segment
 	return segment
 end
 
 function Parser:readArg()
 	local arg = {
+		type = Parser.ARG,
+		pos = self.pos,
 		segments = {}
 	}
-	
-	local complete = false
-	local lastSplit = self.pos
-	
-	while self.pos <= self.size and not complete do
-		if self.token.type == Token.OPER and self.token.str == Syntax.oper.argSegment then
-			print('arg segmenter')
-			lastSplit = self.pos
-			
-		else
-			if self.pos - lastSplit > 1 then
-				complete = true
-			end
-			
-			if self.token.type == Token.IDEN or self.token.type == Token.BUNCH then
-				print('segment #' .. tonumber(#arg.segments))
-				arg.segments[#arg.segments+1] = self:readArgSegment()
+
+	-- go through tokens and ensure bounds
+	while self.pos <= self.size do
+		-- if data hs already been collected
+		-- then make sure there was an argSplit operator before this token
+		if #arg.segments > 0 then
+			local lastTok = self.tokens[self.pos-1]
+			if lastTok.type ~= Token.OPER or lastTok.str ~= Syntax.oper.argSplit then
+				break
 			end
 		end
-		if self.pos == self.size then
-			return arg
+
+		-- collect identifier or bunch and handle accordingly
+		if self.token.type == Token.IDEN or self.token.type == Token.BUNCH then
+			arg.segments[#arg.segments+1] = self:readArgSegment()
 		end
-		
+
+		-- advance for next loop
 		self:advance()
 	end
-	
+
+	-- return argument
 	return arg
 end
 
-function Parser:readStatement()
-	print('statement')
+function Parser:nextStatement()
 	local statement = {
+		type = Parser.STATEMENT,
+		pos = self.pos,
 		command = nil,
 		args = {}
 	}
-	
+
 	local complete = false
 	while self.pos < self.size and not complete do
+		-- if statement ending operator, then signal a statement completion
 		if self.token.type == Token.OPER then
 			if self.token.str == Syntax.oper.statement then
-				print('statement end')
 				complete = true
 			end
-			
+
+			-- add command or argument if identifier or bunch
 		elseif self.token.type == Token.IDEN or self.token.type == Token.BUNCH then
-			print('statement element')
 			local str = self.token.str
 			if self.token.type == Token.BUNCH then
-				str = self:formatBunch(str)
+				str = self:handleBunch(str)
 			end
 
 			if not statement.command then
-				print('command')
 				statement.command = str
 			else
-				print('argument #' .. tonumber(#statement.args))
-					statement.args[#statement.args+1] = self:readArg()
+				statement.args[#statement.args+1] = self:readArg()
 			end
 		end
-		
+
 		self:advance()
 	end
-	
-	self.statements[#self.statements+1] = statement
-	if self.pos < self.size then
-		self:readStatement()
-	end
+
+	return statement
 end
 
 function Parser:start()
-	return self:readStatement()
-end	
+	while self.pos < self.size do
+		self.statements[#self.statements+1] = self:nextStatement()
+	end
+end
 
 function Parser.new(tokens)
-	print(tokens)
-	print('________________')
 	local self = {}
 	setmetatable(self, Parser)
-	
-	self.tokens = tokens
+
+	self.tokens = tokens or {}
 	self.statements = {}
-	
-	self.pos = 1
+
 	self.size = #self.tokens
+	self.pos = 1
 	self.token = self.tokens[self.pos]
-	
+
 	return self
 end
 
